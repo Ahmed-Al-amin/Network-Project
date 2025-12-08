@@ -5,6 +5,9 @@ import argparse
 import time
 from collections import deque
 from datetime import datetime
+from time import process_time 
+from time import perf_counter
+
 
 # ==========================================
 # Configuration & Constants
@@ -15,8 +18,8 @@ SEQ_MAX = 65536
 WRAP_THRESHOLD = 30000   
 
 # Reordering Settings
-REORDER_BUFFER_SIZE = 20  # Keep X packets in buffer to allow sorting
-FLUSH_THRESHOLD = 10      # Process packets when buffer exceeds this count
+REORDER_BUFFER_SIZE = 20  
+FLUSH_THRESHOLD = 20      
 
 # Message Types
 MSG_DATA = 0x01
@@ -24,6 +27,9 @@ MSG_HEARTBEAT = 0x02
 
 # Dec 1, 2025 at 00:00:00 UTC (The Common Epoch)
 TIMESTAMP_OFFSET = 1764547200
+
+LIVENESS_TIMEOUT = 10.0  
+SOCKET_TIMEOUT = 1.0     
 
 # ==========================================
 # Helper Functions
@@ -33,9 +39,9 @@ def compute_checksum(data: bytes) -> int:
 
 def initialize_csv(filename):
     headers = [
-        'device_id', 'seq', 'timestamp_raw', 'readable_time', 'arrival_time', # الترتيب الجديد
+        'device_id', 'seq', 'timestamp_raw', 'readable_time', 'arrival_time', 
         'duplicate_flag', 'gap_flag', 'gap_count',
-        'latency_ms', 'jitter_ms', 'msg_type', 'payload_size'
+        'latency_ms', 'jitter_ms', 'msg_type', 'payload_size', 'cpu_ms'
     ]
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -43,12 +49,9 @@ def initialize_csv(filename):
     print(f"[*] Log file initialized: {filename}")
 
 def log_packet(filename, data_dict):
-    # 1. بنحسب الوقت المقروء (للبشر) زي ما هو
     dt_object = datetime.fromtimestamp(data_dict['arrival_time'])
     readable_str = dt_object.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
-    # 2. (الجديد) بنحول وقت وصول السيرفر لنفس مرجع الكلاينت (مللي ثانية من بداية الشهر)
-    # المعادلة: (وقت السيرفر - وقت البداية) * 1000
     server_relative_time = data_dict['arrival_time'] - TIMESTAMP_OFFSET
     server_arrival_ms = int(server_relative_time * 1000) & 0xFFFFFFFF
 
@@ -59,37 +62,43 @@ def log_packet(filename, data_dict):
             data_dict['seq'],
             data_dict['timestamp_sent'], 
             readable_str,
-            server_arrival_ms,           # <--- هنا التغيير: حطينا الرقم المعدل بدل الأصلي
+            server_arrival_ms,
             int(data_dict['duplicate']),
             int(data_dict['gap_detected']),
             data_dict['gap_count'],
             f"{data_dict['latency']:.3f}",
             f"{data_dict['jitter']:.3f}",
             data_dict['msg_type'],
-            data_dict['payload_len']
+            data_dict['payload_len'],
+            f"{data_dict.get('cpu_ms', 0):.6f}"
         ])
 
 def process_and_log_packet(state, packet_data, filename):
-    """
-    Core Logic: Gap detection and Logging happens HERE, 
-    after the packet has been popped from the sorted buffer.
-    """
+    t0 = perf_counter() 
+    #t0 = process_time()
     seq_num = packet_data['seq']
     device_id = packet_data['device_id']
     
-    # --- Gap & Sequence Logic (Applied on Ordered Stream) ---
+    # Update Stats: Increment Total Received
+    state['stats']['received'] += 1
+
+    # --- Gap & Sequence Logic ---
     gap_detected = False
     gap_count = 0
     
-    # Check if this seq was already processed (Deep Duplicate Check)
+    # Check if this seq was already processed (Duplicate Check)
     if seq_num in state['processed_seqs']:
         packet_data['duplicate'] = True
         packet_data['status'] = 'Duplicate (Buffered)'
+        
+        # Update Stats: Increment Duplicates
+        state['stats']['duplicates'] += 1
+        
         print(f"[Device {device_id}] Duplicate suppressed: Seq {seq_num}")
     else:
         state['processed_seqs'].append(seq_num)
         
-        # Gap Logic against last PROCESSED sequence
+        # Gap Logic
         if state['last_processed_seq'] is not None:
             last = state['last_processed_seq']
             diff = seq_num - last
@@ -106,8 +115,6 @@ def process_and_log_packet(state, packet_data, filename):
                 gap_detected = True
                 gap_count = diff - 1
             
-            # Note: Since we reordered, "diff < 0" shouldn't happen often 
-            # unless a packet arrived WAY too late (outside buffer window).
             if diff < 0 and diff > -WRAP_THRESHOLD:
                  packet_data['status'] = 'Late-Arrival'
 
@@ -116,11 +123,19 @@ def process_and_log_packet(state, packet_data, filename):
     packet_data['gap_detected'] = gap_detected
     packet_data['gap_count'] = gap_count
     
+    # Update Stats: Increment Gaps
+    if gap_detected:
+        state['stats']['gaps'] += gap_count
+        print(f"[Device {device_id}] GAP! Lost {gap_count} packets (Seq {seq_num})")
+
+    t1 = perf_counter()
+    #t1 = process_time()
+    logic_cost_ms = (t1 - t0) * 1000 
+    parse_cost_ms = packet_data.get('parse_cost_ms', 0)
+    packet_data['cpu_ms'] = logic_cost_ms + parse_cost_ms
+    
     # Log to CSV
     log_packet(filename, packet_data)
-    
-    if gap_detected:
-         print(f"[Device {device_id}] GAP! Lost {gap_count} packets (Seq {seq_num})")
 
 # ==========================================
 # Main Server Loop
@@ -133,20 +148,54 @@ def main():
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.bind(('', args.port))
+    server_socket.settimeout(SOCKET_TIMEOUT)
     initialize_csv(args.output)
     
     print(f"[*] Server listening on 0.0.0.0:{args.port} with Reordering Logic")
 
-    # State: { device_id: { 'buffer': [], 'last_latency': 0.0, 'processed_seqs': deque, ... } }
+    # State now includes 'stats'
     devices_state = {}
 
     try:
         while True:
- # 1. Receive
-            data, addr = server_socket.recvfrom(1024)
-                
-            arrival_time = time.time()
+
+            current_real_time = time.time()
             
+            # Liveness Check
+            for d_id, d_state in devices_state.items():
+                if d_state.get('status_alive', True): 
+                    time_since_last = current_real_time - d_state.get('last_seen', current_real_time)
+                    
+                    if time_since_last > LIVENESS_TIMEOUT:
+                        print(f"[!] ALERT: Device {d_id} is OFFLINE (No signal for {time_since_last:.1f}s)")
+                        d_state['status_alive'] = False
+                                                # --- NEW: FORCE FLUSH BUFFER FOR DEAD DEVICE ---
+                        if len(d_state['buffer']) > 0:
+                            print(f"[*] Flushing {len(d_state['buffer'])} stuck packets for Device {d_id}...")
+                            # 1. Sort what we have
+                            d_state['buffer'].sort(key=lambda x: x['timestamp_sent'])
+                            
+                            # 2. Process all of them
+                            while d_state['buffer']:
+                                pkt = d_state['buffer'].pop(0)
+                                pkt['status'] = 'Flushed (Timeout)'
+                                process_and_log_packet(d_state, pkt, args.output)
+
+            # 1. Receive
+            try:
+                data, addr = server_socket.recvfrom(1024)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"[!] Socket Error: {e}")
+                break
+
+            arrival_time = time.time()
+
+            # --- START PARSE TIMER ---
+            t_parse_start = perf_counter()
+            #t_parse_start = process_time()
+                            
             # 2. Parse
             if len(data) < HEADER_SIZE + 2: continue
             
@@ -162,27 +211,34 @@ def main():
             except struct.error:
                 continue
 
+            # --- STOP PARSE TIMER ---
+            t_parse_end = perf_counter()
+            #t_parse_end = process_time()
+            parse_cost_ms = (t_parse_end - t_parse_start) * 1000
+
             # 3. Initialize State
             if device_id not in devices_state:
                 devices_state[device_id] = {
-                    'buffer': [], # The Reordering Buffer
+                    'buffer': [], 
                     'last_latency': 0.0,
                     'last_processed_seq': None,
-                    'processed_seqs': deque(maxlen=500)
+                    'processed_seqs': deque(maxlen=500),
+                    'last_seen': arrival_time,
+                    'status_alive': True,
+                    # --- NEW STATS COUNTERS ---
+                    'stats': {'received': 0, 'duplicates': 0, 'gaps': 0}
                 }
             
             state = devices_state[device_id]
+            state['last_seen'] = arrival_time
+            if state['status_alive'] == False:
+                 print(f"[*] ALERT: Device {device_id} is BACK ONLINE!")
+            state['status_alive'] = True
             
-            # 4. Pre-Calculation (Network Stats must be calculated on ARRIVAL)
-           # --- Latency Calculation with Custom Epoch ---
-            # 1. Convert Server Arrival to Relative MS (Same as Client)
+            # 4. Pre-Calculation
             relative_arrival = arrival_time - TIMESTAMP_OFFSET
             arrival_ms_masked = int(relative_arrival * 1000) & 0xFFFFFFFF
-            
-            # 2. Calculate Latency
             latency_ms = arrival_ms_masked - ts_sent
-            
-            # Fix negative wrap around
             if latency_ms < -2147483648: latency_ms += 4294967296
             latency_ms = max(0, latency_ms)
 
@@ -191,32 +247,29 @@ def main():
                 jitter = abs(latency_ms - state['last_latency'])
             state['last_latency'] = latency_ms
 
-            # 5. Add to Buffer (Store raw data + metrics)
+            # 5. Add to Buffer
             packet_entry = {
                 'device_id': device_id,
                 'seq': seq_num,
-                'timestamp_sent': ts_sent,      # Sort Key
+                'timestamp_sent': ts_sent,      
                 'arrival_time': arrival_time,
                 'latency': latency_ms,
                 'jitter': jitter,
-                'duplicate': False,             # Calculated later
-                'gap_detected': False,          # Calculated later
+                'duplicate': False,            
+                'gap_detected': False,          
                 'gap_count': 0,
                 'msg_type': 'DATA' if msg_type == MSG_DATA else 'HEARTBEAT',
                 'payload_len': len(data) - HEADER_SIZE - 2,
-                'status': 'Buffered'
+                'status': 'Buffered',
+                'parse_cost_ms': parse_cost_ms
             }
             
             state['buffer'].append(packet_entry)
             
             # 6. Reordering Logic
-            # Sort buffer by timestamp_sent (Client Time)
             state['buffer'].sort(key=lambda x: x['timestamp_sent'])
             
-            # 7. Process Buffer if full (Flush logic)
-            # We keep FLUSH_THRESHOLD packets in buffer to wait for latecomers
             while len(state['buffer']) > FLUSH_THRESHOLD:
-                # Pop the oldest packet (smallest timestamp)
                 packet_to_process = state['buffer'].pop(0)
                 process_and_log_packet(state, packet_to_process, args.output)
 
@@ -224,12 +277,32 @@ def main():
         print("\n[*] Interrupt received...")
     finally:
         print("[*] Flushing remaining buffers...")
-        # Flush all remaining packets in buffers
         for dev_id, state in devices_state.items():
             state['buffer'].sort(key=lambda x: x['timestamp_sent'])
             for pkt in state['buffer']:
                 pkt['status'] = 'Flushed'
                 process_and_log_packet(state, pkt, args.output)
+        
+        # --- PRINT SUMMARY REPORT ---
+        print("\n" + "="*40)
+        print(" FINAL SESSION SUMMARY")
+        print("="*40)
+        
+        for dev_id, info in devices_state.items():
+            stats = info['stats']
+            total = stats['received']
+            gaps = stats['gaps']
+            dups = stats['duplicates']
+            
+            dup_rate = (dups / total * 100) if total > 0 else 0.0
+            
+            print(f"Device ID: {dev_id}")
+            print(f"  - Total Packets Received:   {total}")
+            print(f"  - Total Duplicates Detected: {dups}")
+            print(f"  - Duplicate Rate:           {dup_rate:.2f}%")
+            print(f"  - Total Missing Sequences:  {gaps}")
+            print("-" * 20)
+        
         print("[*] Server stopped.")
         server_socket.close()
 

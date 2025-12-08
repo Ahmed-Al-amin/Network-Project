@@ -91,7 +91,6 @@ def main():
     parser.add_argument('--jam_duration', type=float, default=0, help='Duration of jam in seconds')
 
     args = parser.parse_args()
-    args = parser.parse_args()
 
     # Apply configuration
     device_id = args.id
@@ -159,8 +158,11 @@ def main():
                     # We want total packet <= 200 (or payload <= 200 depending on spec)
                     # Let's assume payload limit strictly.
                     if len(payload) > MAX_PAYLOAD_SIZE:
-                        print(f"[!] Warning: Batch too large ({len(payload)}B). Sending anyway (or implement split logic).")
-                    
+                        print(f"\n[!!!] FATAL ERROR: Payload size ({len(payload)}B) exceeds limit ({MAX_PAYLOAD_SIZE}B).")
+                        print(f"[!!!] Current Batch Size: {batch_limit}")
+                        print(f"[!!!] Action Required: Please restart the client with a smaller --batch size.")
+                        
+                        break                     
                     # Create Packet
                     packet = create_packet(device_id, seq_num, MSG_DATA, payload)
                     
