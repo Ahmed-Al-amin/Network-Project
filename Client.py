@@ -23,15 +23,17 @@ HEADER_FORMAT = '!HHIB'
 MSG_DATA = 0x01
 MSG_HEARTBEAT = 0x02
 
-# Battery Simulation
-BATTERY_LOW_THRESHOLD = 3.3
+# Dec 1, 2025 at 00:00:00 UTC (The Common Epoch)
+TIMESTAMP_OFFSET = 1764547200
 
 def get_current_time_ms():
     """
-    Returns current time in milliseconds, truncated to 32-bit integer.
-    Essential for fitting in 4 bytes header and measuring Jitter.
+    Returns current time in milliseconds relative to TIMESTAMP_OFFSET.
     """
-    return int(time.time() * 1000) & 0xFFFFFFFF
+    current_time = time.time()
+    # Subtract the offset to get "time since 2024"
+    relative_time = current_time - TIMESTAMP_OFFSET
+    return int(relative_time * 1000) & 0xFFFFFFFF
 
 def compute_checksum(data: bytes) -> int:
     """Compute 16-bit checksum."""
@@ -84,7 +86,11 @@ def main():
     parser.add_argument('--host', type=str, default='localhost', help='Server IP')
     parser.add_argument('--port', type=int, default=12000, help='Server Port')
     parser.add_argument('--interval', type=float, default=1.0, help='Reporting Interval (s)')
-    parser.add_argument('--batch', type=int, default=1, help='Batch size (1 to N)')
+    parser.add_argument('--batch', type=int, default=1, help='Batch size (1 to N)') 
+    parser.add_argument('--jam_at', type=int, default=0, help='Stop sending data after seq X')
+    parser.add_argument('--jam_duration', type=float, default=0, help='Duration of jam in seconds')
+
+    args = parser.parse_args()
     args = parser.parse_args()
 
     # Apply configuration
@@ -99,19 +105,43 @@ def main():
     print(f"[*] Sensor {device_id} started.")
     print(f"[*] Target: {server_addr}")
     print(f"[*] Interval: {reporting_interval}s | Batch Size: {batch_limit}")
+    if args.jam_at > 0:
+        print(f"[*] Simulation: Will JAM sensor at Seq {args.jam_at} for {args.jam_duration}s")
 
     seq_num = 1
     readings_buffer = []
     last_action_time = time.time()
+
+    # Jamming State
+    jam_start_time = 0
+    is_jammed = False
 
     try:
         while True:
             current_time = time.time()
             time_since_last = current_time - last_action_time
 
+            # --- JAMMING LOGIC START ---
+            # Check if we reached the target sequence to jam
+            if args.jam_at > 0 and seq_num >= args.jam_at and not is_jammed:
+                print(f"\n[!] SIMULATING SENSOR FAILURE (JAMMING) for {args.jam_duration}s...")
+                is_jammed = True
+                jam_start_time = current_time
+            
+            # Check if jam duration is over
+            if is_jammed:
+                if (current_time - jam_start_time) > args.jam_duration:
+                    print("[!] SENSOR RECOVERED. Resuming Data...")
+                    is_jammed = False # Resume normal operation
+                    args.jam_at = 0   # Disable jam so it doesn't happen again
+                else:
+                    # While jammed, we SKIP the Data Block to allow Heartbeat Block to trigger
+                    pass 
+            # --- JAMMING LOGIC END ---
+
             # --- Logic: Generate Data ---
             # We generate data periodically based on REPORTING_INTERVAL
-            if time_since_last >= reporting_interval:
+            if not is_jammed and time_since_last >= reporting_interval:
                 
                 # 1. Read Sensor
                 reading = generate_sensor_readings()
