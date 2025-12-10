@@ -7,6 +7,8 @@ from collections import deque
 from datetime import datetime
 from time import process_time 
 from time import perf_counter
+import signal  # <--- ADD THIS
+
 
 
 # ==========================================
@@ -141,6 +143,24 @@ def process_and_log_packet(state, packet_data, filename):
 # Main Server Loop
 # ==========================================
 def main():
+
+
+    # ==========================================
+    # START OF NEW CODE
+    # ==========================================
+    def signal_handler(sig, frame):
+        # This turns SIGTERM (kill command) into an exception
+        # so your 'finally' block runs and saves the CSV.
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    # ==========================================
+    # END OF NEW CODE
+    # ==========================================
+
+
+    
     parser = argparse.ArgumentParser(description='IoT Telemetry Server')
     parser.add_argument('--port', type=int, default=12000)
     parser.add_argument('--output', type=str, default='telemetry_log.csv')

@@ -1,219 +1,209 @@
-#!/usr/bin/env python3
-"""
-IoT Telemetry Protocol - Main Test Runner
-Orchestrates server and client processes and analyzes results
-"""
-
 import subprocess
 import time
 import os
 import sys
-import csv
-from collections import defaultdict
+import shutil
+import signal
 
-class TestRunner:
-    def __init__(self, duration=20):
-        self.duration = duration
-        self.server_process = None
-        self.client_process = None
-        self.csv_file = "telemetry_log.csv"
-        self.packet_log = "packet_log.txt"
-        
-    def cleanup_logs(self):
-        """Remove old log files"""
-        for f in [self.csv_file, self.packet_log]:
-            if os.path.exists(f):
-                os.remove(f)
-                print(f"[*] Cleaned up {f}")
-    
-    def start_server(self):
-        """Start the server process"""
-        try:
-            self.server_process = subprocess.Popen(
-                [sys.executable, 'Server.py'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            print(f"[+] Server started with PID: {self.server_process.pid}")
-            time.sleep(1)  # Let server bind to socket
-            return True
-        except Exception as e:
-            print(f"[-] Failed to start server: {e}")
-            return False
-    
-    def start_client(self):
-        """Start the client process"""
-        try:
-            self.client_process = subprocess.Popen(
-                [sys.executable, 'Client.py'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            print(f"[+] Client started with PID: {self.client_process.pid}")
-            return True
-        except Exception as e:
-            print(f"[-] Failed to start client: {e}")
-            return False
-    
-    def stop_processes(self):
-        """Gracefully stop both processes"""
-        if self.client_process:
-            try:
-                print(f"[*] Stopping Client (PID: {self.client_process.pid})")
-                self.client_process.terminate()
-                self.client_process.wait(timeout=5)
-                print("[+] Client stopped")
-            except subprocess.TimeoutExpired:
-                self.client_process.kill()
-                print("[!] Client killed (timeout)")
-            except Exception as e:
-                print(f"[-] Error stopping client: {e}")
-        
-        if self.server_process:
-            try:
-                print(f"[*] Stopping Server (PID: {self.server_process.pid})")
-                self.server_process.terminate()
-                self.server_process.wait(timeout=5)
-                print("[+] Server stopped")
-            except subprocess.TimeoutExpired:
-                self.server_process.kill()
-                print("[!] Server killed (timeout)")
-            except Exception as e:
-                print(f"[-] Error stopping server: {e}")
-    
-    def analyze_results(self):
-        """Analyze test results from CSV"""
-        if not os.path.exists(self.csv_file):
-            print("[-] No telemetry log found - test may have failed")
-            return
-        
-        try:
-            stats = {
-                'total_packets': 0,
-                'duplicates': 0,
-                'gaps': 0,
-                'checksum_errors': 0,
-                'devices': defaultdict(lambda: {'packets': 0, 'duplicates': 0})
-            }
-            
-            with open(self.csv_file, 'r') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    stats['total_packets'] += 1
-                    dev_id = row.get('device_id')
-                    
-                    if dev_id:
-                        stats['devices'][dev_id]['packets'] += 1
-                    
-                    if row.get('duplicate_flag') == '1':
-                        stats['duplicates'] += 1
-                        if dev_id:
-                            stats['devices'][dev_id]['duplicates'] += 1
-                    
-                    if row.get('gap_flag') == '1':
-                        stats['gaps'] += 1
-                    
-                    if row.get('checksum_valid') == '0':
-                        stats['checksum_errors'] += 1
-            
-            # Print results
-            print("\n" + "="*70)
-            print("TEST RESULTS SUMMARY")
-            print("="*70)
-            print(f"\n[GENERAL STATISTICS]")
-            print(f"  Total packets received: {stats['total_packets']}")
-            print(f"  Unique devices: {len(stats['devices'])}")
-            
-            print(f"\n[DATA INTEGRITY]")
-            dup_rate = (stats['duplicates'] / stats['total_packets'] * 100) if stats['total_packets'] > 0 else 0
-            gap_rate = (stats['gaps'] / stats['total_packets'] * 100) if stats['total_packets'] > 0 else 0
-            err_rate = (stats['checksum_errors'] / stats['total_packets'] * 100) if stats['total_packets'] > 0 else 0
-            
-            print(f"  Duplicate packets: {stats['duplicates']} ({dup_rate:.2f}%)")
-            print(f"  Sequence gaps: {stats['gaps']} ({gap_rate:.2f}%)")
-            print(f"  Checksum errors: {stats['checksum_errors']} ({err_rate:.2f}%)")
-            
-            if stats['devices']:
-                print(f"\n[PER-DEVICE BREAKDOWN]")
-                for dev_id in sorted(stats['devices'].keys()):
-                    dev = stats['devices'][dev_id]
-                    dup_pct = (dev['duplicates'] / dev['packets'] * 100) if dev['packets'] > 0 else 0
-                    print(f"  Device {dev_id}: {dev['packets']} packets, {dev['duplicates']} dupes ({dup_pct:.2f}%)")
-            
-            # Pass/fail assessment
-            print(f"\n[ASSESSMENT]")
-            if dup_rate < 1.0 and err_rate == 0:
-                print("  ✓ TEST PASSED - All quality metrics within acceptable range")
-            else:
-                print("  ✗ TEST FAILED - Quality metrics exceeded thresholds")
-                if dup_rate >= 1.0:
-                    print(f"    - Duplicate rate {dup_rate:.2f}% exceeds 1% threshold")
-                if err_rate > 0:
-                    print(f"    - Checksum errors detected")
-            
-            print("="*70 + "\n")
-        
-        except Exception as e:
-            print(f"[-] Error analyzing results: {e}")
-    
-    def run(self):
-        """Execute the complete test"""
-        print("\n" + "="*70)
-        print("IoT TELEMETRY PROTOCOL - BASELINE TEST")
-        print("="*70)
-        print(f"\nTest Duration: {self.duration} seconds")
-        print("="*70 + "\n")
-        
-        # Cleanup old logs
-        self.cleanup_logs()
-        
-        # Start server
-        if not self.start_server():
-            print("[-] Failed to start server - aborting test")
-            return 1
-        
-        # Start client
-        if not self.start_client():
-            print("[-] Failed to start client - stopping server")
-            self.stop_processes()
-            return 1
-        
-        # Run test
-        print(f"\n[*] Test running for {self.duration} seconds...")
-        try:
-            time.sleep(self.duration)
-        except KeyboardInterrupt:
-            print("\n[!] Test interrupted by user")
-        
-        print("[*] Test duration complete")
-        
-        # Stop processes
-        print()
-        self.stop_processes()
-        
-        # Analyze results
-        time.sleep(1)  # Give server time to write logs
-        print()
-        self.analyze_results()
-        
-        print("[+] Test finished - check 'telemetry_log.csv' for detailed results")
-        print("[+] Check 'packet_log.txt' for client transmission details\n")
-        
-        return 0
+# ==========================================
+# CONFIGURATION
+# ==========================================
+INTERFACE = "lo"
+ROOT_DIR = "experiment_results"
+SERVER_PORT = 12000
+DURATION = 40  # Seconds per test
 
-def main():
-    """Main entry point"""
-    duration = 20
-    
-    if len(sys.argv) > 1:
-        try:
-            duration = int(sys.argv[1])
-        except ValueError:
-            print(f"Usage: {sys.argv[0]} [duration_seconds]")
-            print(f"Using default duration: {duration}s")
-    
-    runner = TestRunner(duration=duration)
-    return runner.run()
+# ==========================================
+# SYSTEM HELPERS
+# ==========================================
+def run_cmd(cmd, bg=False):
+    """Executes shell command."""
+    if bg:
+        return subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run(cmd, shell=True, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def cleanup():
+    """Resets environment."""
+    run_cmd(f"tc qdisc del dev {INTERFACE} root")
+    run_cmd("pkill -f 'python3 Server.py'")
+    run_cmd("pkill -f 'python3 Client.py'")
+    run_cmd("pkill -f 'tcpdump'")
+    time.sleep(1)
+
+def print_header(title):
+    print("\n" + "="*60)
+    print(f"[*] {title}")
+    print("="*60)
+
+# ==========================================
+# STANDARD TEST RUNNER
+# ==========================================
+def run_standard_test(section, name, interval, batch, netem, pcap=False, extra_args="", clients=1):
+    print(f"\n--- Scenario: {name} ---")
+    print(f"    Settings: Interval={interval}s | Batch={batch} | Clients={clients}")
+    print(f"    Netem: {netem}")
+
+    csv_path = f"{ROOT_DIR}/{section}/{name}.csv"
+    pcap_path = f"{ROOT_DIR}/{section}/{name}.pcap"
+    cleanup()
+
+    if netem != "none":
+        run_cmd(f"tc qdisc add dev {INTERFACE} root netem {netem}")
+
+    if pcap:
+        run_cmd(f"tcpdump -i {INTERFACE} udp port {SERVER_PORT} -w {pcap_path} -q", bg=True)
+        time.sleep(1)
+
+    server_proc = subprocess.Popen(["python3", "Server.py", "--output", csv_path])
+    time.sleep(1)
+
+    client_procs = []
+    for i in range(clients):
+        dev_id = 101 + i
+        cmd = f"python3 Client.py --id {dev_id} --interval {interval} --batch {batch} {extra_args}"
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        client_procs.append(proc)
+        
+    for i in range(DURATION, 0, -1):
+        sys.stdout.write(f"\r    Running... {i}s remaining ")
+        sys.stdout.flush()
+        time.sleep(1)
+    print("\n    [+] Test Finished.")
+
+    for proc in client_procs: proc.terminate()
+    server_proc.terminate()
+    try: server_proc.wait(timeout=2)
+    except: server_proc.kill()
+    cleanup()
+
+def run_intermittent_test(section):
+    name = "intermittent_tunnel"
+    print(f"\n--- Scenario: {name} (The Tunnel) ---")
+    csv_path = f"{ROOT_DIR}/{section}/{name}.csv"
+    cleanup()
+
+    server_proc = subprocess.Popen(["python3", "Server.py", "--output", csv_path])
+    time.sleep(1)
+    client_proc = subprocess.Popen("python3 Client.py --id 101 --interval 0.5", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    print("    [1/3] Phase Normal (15s)...")
+    time.sleep(15)
+    print("    [2/3] CUTTING CONNECTION (Loss 100% for 15s)...")
+    run_cmd(f"tc qdisc add dev {INTERFACE} root netem loss 100%")
+    time.sleep(15)
+    print("    [3/3] RESTORING CONNECTION (Normal for 15s)...")
+    run_cmd(f"tc qdisc del dev {INTERFACE} root")
+    time.sleep(15)
+
+    client_proc.terminate()
+    server_proc.terminate()
+    cleanup()
+
+# ==========================================
+# CUSTOM MIXED BEHAVIOR TEST (SECTION 4)
+# ==========================================
+def run_mixed_behavior_test(section):
+    name = "mixed_clients_complex"
+    print(f"\n--- Scenario: {name} (The Ultimate Test) ---")
+    print("    Network: Delay 30ms + Jitter 5ms + Loss 2%")
+    print("    Client A (101): High Load (0.05s) + Jamming (Heartbeat test)")
+    print("    Client B (102): Standard Traffic")
+    print("    Client C (103): Standard Traffic")
+
+    csv_path = f"{ROOT_DIR}/{section}/{name}.csv"
+    pcap_path = f"{ROOT_DIR}/{section}/{name}.pcap"
+    cleanup()
+
+    # 1. Apply Global Network "messiness" (affects everyone)
+    run_cmd(f"tc qdisc add dev {INTERFACE} root netem delay 30ms 5ms distribution normal loss 2%")
+
+    # 2. Start PCAP
+    run_cmd(f"tcpdump -i {INTERFACE} udp port {SERVER_PORT} -w {pcap_path} -q", bg=True)
+    time.sleep(1)
+
+    # 3. Start Server
+    server_proc = subprocess.Popen(["python3", "Server.py", "--output", csv_path])
+    time.sleep(1)
+
+    # 4. Start Clients with DIFFERENT configurations
+    procs = []
+    
+    # Client A: High Load + Jam at 20s
+    cmd_a = "python3 Client.py --id 101 --interval 0.05 --jam_at 20 --jam_duration 10"
+    procs.append(subprocess.Popen(cmd_a, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+    # Client B & C: Normal
+    cmd_b = "python3 Client.py --id 102 --interval 1.0"
+    procs.append(subprocess.Popen(cmd_b, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    
+    cmd_c = "python3 Client.py --id 103 --interval 1.0"
+    procs.append(subprocess.Popen(cmd_c, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+    # 5. Wait
+    for i in range(DURATION, 0, -1):
+        sys.stdout.write(f"\r    Running... {i}s remaining ")
+        sys.stdout.flush()
+        time.sleep(1)
+    print("\n    [+] Test Finished.")
+
+    for p in procs: p.terminate()
+    server_proc.terminate()
+    try: server_proc.wait(timeout=2)
+    except: server_proc.kill()
+    cleanup()
+
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
 if __name__ == "__main__":
-    sys.exit(main())
+    if os.geteuid() != 0:
+        print("[!!!] ERROR: Must run as root (sudo).")
+        sys.exit(1)
+
+    if os.path.exists(ROOT_DIR): shutil.rmtree(ROOT_DIR)
+    for sec in ["section1_functional", "section2_network", "section3_advanced", "section4_combined"]:
+        os.makedirs(f"{ROOT_DIR}/{sec}")
+
+    try:
+        # SECTION 1
+        print_header("SECTION 1: FUNCTIONAL TESTS")
+        sec = "section1_functional"
+        run_standard_test(sec, "baseline_1s", 1.0, 1, "none", pcap=True)
+        run_standard_test(sec, "batching_mode", 1.0, 5, "none", pcap=True)
+        run_standard_test(sec, "fast_rate", 0.05, 1, "none")
+        run_standard_test(sec, "forced_heartbeats", 1.0, 1, "none", extra_args="--jam_at 10 --jam_duration 20")
+
+        # SECTION 2
+        print_header("SECTION 2: NETWORK IMPAIRMENTS")
+        sec = "section2_network"
+        run_standard_test(sec, "loss_5_percent", 1.0, 1, "loss 5%", pcap=True)
+        run_standard_test(sec, "jitter_reordering", 1.0, 1, "delay 100ms 10ms distribution normal", pcap=True)
+        run_standard_test(sec, "duplication_20", 1.0, 1, "duplicate 20%", pcap=True)
+
+        # SECTION 3
+        print_header("SECTION 3: SCALABILITY & STRESS")
+        sec = "section3_advanced"
+        run_standard_test(sec, "multiclient_5_users", 1.0, 1, "none", clients=5)
+        run_standard_test(sec, "stress_high_cpu", 0.001, 10, "none") 
+        run_intermittent_test(sec)
+
+        # SECTION 4
+        print_header("SECTION 4: REAL-WORLD COMPLEXITY")
+        sec = "section4_combined"
+        
+        # Scenario 1: "Bad WiFi"
+        run_standard_test(sec, "bad_wifi_simulation", 1.0, 1, "delay 50ms 20ms distribution normal loss 2%", pcap=True)
+
+        # Scenario 2: "Chaos Mode" (Multiple Clients + High Loss)
+        # 3 Clients trying to talk over a 5% lossy line
+        run_standard_test(sec, "chaos_multi_user_loss", 1.0, 1, "loss 5%", clients=3)
+
+        # Scenario 3: "The Ultimate Test" (Mixed Clients + Mixed Network)
+        run_mixed_behavior_test(sec)
+
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted.")
+    finally:
+        cleanup()
+        print(f"\n[*] ALL DONE. Results in: {ROOT_DIR}/")

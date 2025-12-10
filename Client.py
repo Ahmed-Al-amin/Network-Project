@@ -89,8 +89,20 @@ def main():
     parser.add_argument('--batch', type=int, default=1, help='Batch size (1 to N)') 
     parser.add_argument('--jam_at', type=int, default=0, help='Stop sending data after seq X')
     parser.add_argument('--jam_duration', type=float, default=0, help='Duration of jam in seconds')
+    parser.add_argument('--seed', type=int, default=None, help='Deterministic seed for RNG')
+
 
     args = parser.parse_args()
+
+    # --- SEEDING LOGIC ---
+    if args.seed is not None:
+        random.seed(args.seed)
+        print(f"[*] Mode: DETERMINISTIC (Seed: {args.seed})")
+    else:
+        seed_val = int(time.time() * 1000) % 1000000
+        random.seed(seed_val)
+        print(f"[*] Mode: RANDOM (Seed: {seed_val})")
+    # ---------------------
 
     # Apply configuration
     device_id = args.id
