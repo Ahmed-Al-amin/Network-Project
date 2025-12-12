@@ -18,7 +18,7 @@ HEADER_FORMAT = '!HHIB'  # DeviceID(2), SeqNum(2), Timestamp(4), MsgType(1)
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 SEQ_MAX = 65536          
 WRAP_THRESHOLD = 30000   
-
+VERSION = 1
 # Reordering Settings
 REORDER_BUFFER_SIZE = 20  
 FLUSH_THRESHOLD = 20      
@@ -31,7 +31,9 @@ MSG_HEARTBEAT = 0x02
 TIMESTAMP_OFFSET = 1764547200
 
 LIVENESS_TIMEOUT = 10.0  
-SOCKET_TIMEOUT = 1.0     
+SOCKET_TIMEOUT = 1.0    
+SOURCE_PORT = 12000
+OUTPUT_CSV = 'telemetry_log.csv' 
 
 # ==========================================
 # Helper Functions
@@ -162,9 +164,13 @@ def main():
 
     
     parser = argparse.ArgumentParser(description='IoT Telemetry Server')
-    parser.add_argument('--port', type=int, default=12000)
-    parser.add_argument('--output', type=str, default='telemetry_log.csv')
+    parser.add_argument('--port', type=int, default=SOURCE_PORT, help='Server Port')
+    parser.add_argument('--output', type=str, default=OUTPUT_CSV, help='CSV output file')
+    parser.add_argument('--died_after', type=int, default=LIVENESS_TIMEOUT, help='consider the client dead after timeout (seconds)')
+
     args = parser.parse_args()
+
+    liveness_timeout_client = args.died_after
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.bind(('', args.port))
@@ -186,7 +192,7 @@ def main():
                 if d_state.get('status_alive', True): 
                     time_since_last = current_real_time - d_state.get('last_seen', current_real_time)
                     
-                    if time_since_last > LIVENESS_TIMEOUT:
+                    if time_since_last > liveness_timeout_client:
                         print(f"[!] ALERT: Device {d_id} is OFFLINE (No signal for {time_since_last:.1f}s)")
                         d_state['status_alive'] = False
                                                 # --- NEW: FORCE FLUSH BUFFER FOR DEAD DEVICE ---
@@ -221,8 +227,14 @@ def main():
             
             try:
                 header = data[:HEADER_SIZE]
-                device_id, seq_num, ts_sent, msg_type = struct.unpack(HEADER_FORMAT, header)
+                device_id, seq_num, ts_sent, msg_version_byte = struct.unpack(HEADER_FORMAT, header)
                 
+                # Extract Version: Shift right by 4 bits to get the top half
+                packet_version = (msg_version_byte >> 4) & 0x0F 
+                
+                # Extract MsgType: AND with 0x0F (00001111) to get the bottom half
+                msg_type = msg_version_byte & 0x0F
+
                 # Checksum
                 checksum = struct.unpack('!H', data[HEADER_SIZE:HEADER_SIZE+2])[0]
                 if compute_checksum(header + data[HEADER_SIZE+2:]) != checksum:

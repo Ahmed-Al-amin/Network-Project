@@ -12,19 +12,23 @@ import sys
 SERVER_HOST = 'localhost'
 SERVER_PORT = 12000
 DEVICE_ID = 1001
-REPORTING_INTERVAL = 1.0  # Seconds (Float for precision)
+REPORTING_INTERVAL = 1.0  # Seconds
 HEARTBEAT_INTERVAL = 5.0  # Seconds
 MAX_PAYLOAD_SIZE = 200    # Bytes
-BATCH_SIZE = 3            # Readings per packet
+BATCH_SIZE = 5            # Readings per packet
 
 # Protocol Definition
 # Header: DeviceID(2) + SeqNum(2) + Timestamp(4) + MsgType(1) = 9 Bytes
 HEADER_FORMAT = '!HHIB'  
 MSG_DATA = 0x01
 MSG_HEARTBEAT = 0x02
+PROTOCOL_VERSION = 1  # We are defining this as Version 1
 
 # Dec 1, 2025 at 00:00:00 UTC (The Common Epoch)
 TIMESTAMP_OFFSET = 1764547200
+
+# Global state for smooth sensor simulation
+sim_state = {'temp': 25.0, 'hum': 50.0, 'volt': 3.7}
 
 def get_current_time_ms():
     """
@@ -40,11 +44,25 @@ def compute_checksum(data: bytes) -> int:
     return sum(data) & 0xFFFF
 
 def generate_sensor_readings():
-    """Simulate sensor readings."""
+    """
+    Simulates a sensor that 'drifts' slowly rather than jumping randomly.
+    """
+    global sim_state
+    
+    # Drift the values slightly
+    sim_state['temp'] += random.uniform(-0.5, 0.5)
+    sim_state['hum']  += random.uniform(-1.0, 1.0)
+    sim_state['volt'] += random.uniform(-0.05, 0.05)
+    
+    # Clamp values to realistic ranges
+    sim_state['temp'] = max(15.0, min(35.0, sim_state['temp']))
+    sim_state['hum']  = max(30.0, min(80.0, sim_state['hum']))
+    sim_state['volt'] = max(3.3, min(4.2, sim_state['volt']))
+    
     return {
-        'temperature': round(random.uniform(20.0, 30.0), 2),
-        'humidity': round(random.uniform(30.0, 70.0), 2),
-        'voltage': round(random.uniform(3.0, 4.2), 2)
+        'temperature': round(sim_state['temp'], 2),
+        'humidity': round(sim_state['hum'], 2),
+        'voltage': round(sim_state['volt'], 2)
     }
 
 def create_packet(device_id, seq_num, msg_type, payload_data=b''):
@@ -53,9 +71,12 @@ def create_packet(device_id, seq_num, msg_type, payload_data=b''):
     """
     # 1. Prepare Header Fields
     timestamp = get_current_time_ms()
+
+    # Logic: Shift Version left by 4 bits, then OR it with the Message Type
+    msg_version_byte = (PROTOCOL_VERSION << 4) | (msg_type & 0x0F)
     
     # 2. Pack Header (9 Bytes)
-    header = struct.pack(HEADER_FORMAT, device_id, seq_num, timestamp, msg_type)
+    header = struct.pack(HEADER_FORMAT, device_id, seq_num, timestamp, msg_version_byte)
     
     # 3. Compute Checksum (Header + Payload)
     checksum = compute_checksum(header + payload_data)
@@ -82,15 +103,13 @@ def prepare_batch_payload(readings_list):
 def main():
     # 1. Argument Parsing
     parser = argparse.ArgumentParser(description='IoT Telemetry Client')
-    parser.add_argument('--id', type=int, default=1001, help='Device ID')
-    parser.add_argument('--host', type=str, default='localhost', help='Server IP')
-    parser.add_argument('--port', type=int, default=12000, help='Server Port')
-    parser.add_argument('--interval', type=float, default=1.0, help='Reporting Interval (s)')
+    parser.add_argument('--id', type=int, default=DEVICE_ID, help='Device ID')
+    parser.add_argument('--host', type=str, default=SERVER_HOST, help='Server IP')
+    parser.add_argument('--port', type=int, default=SERVER_PORT, help='Server Port')
+    parser.add_argument('--interval', type=float, default=REPORTING_INTERVAL, help='Reporting Interval (s)')
     parser.add_argument('--batch', type=int, default=1, help='Batch size (1 to N)') 
-    parser.add_argument('--jam_at', type=int, default=0, help='Stop sending data after seq X')
-    parser.add_argument('--jam_duration', type=float, default=0, help='Duration of jam in seconds')
     parser.add_argument('--seed', type=int, default=None, help='Deterministic seed for RNG')
-
+    parser.add_argument('--heartbeat', type=float, default=HEARTBEAT_INTERVAL, help='heartbeat interval (s)')
 
     args = parser.parse_args()
 
@@ -109,6 +128,7 @@ def main():
     server_addr = (args.host, args.port)
     reporting_interval = args.interval
     batch_limit = args.batch
+    heart_beat_interval = args.heartbeat
 
     # 2. Setup UDP Socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -116,93 +136,63 @@ def main():
     print(f"[*] Sensor {device_id} started.")
     print(f"[*] Target: {server_addr}")
     print(f"[*] Interval: {reporting_interval}s | Batch Size: {batch_limit}")
-    if args.jam_at > 0:
-        print(f"[*] Simulation: Will JAM sensor at Seq {args.jam_at} for {args.jam_duration}s")
 
     seq_num = 1
     readings_buffer = []
-    last_action_time = time.time()
 
-    # Jamming State
-    jam_start_time = 0
-    is_jammed = False
+    # Independent Timers
+    last_read_time = time.time()
+    last_send_time = time.time()  
 
     try:
         while True:
             current_time = time.time()
-            time_since_last = current_time - last_action_time
 
-            # --- JAMMING LOGIC START ---
-            # Check if we reached the target sequence to jam
-            if args.jam_at > 0 and seq_num >= args.jam_at and not is_jammed:
-                print(f"\n[!] SIMULATING SENSOR FAILURE (JAMMING) for {args.jam_duration}s...")
-                is_jammed = True
-                jam_start_time = current_time
-            
-            # Check if jam duration is over
-            if is_jammed:
-                if (current_time - jam_start_time) > args.jam_duration:
-                    print("[!] SENSOR RECOVERED. Resuming Data...")
-                    is_jammed = False # Resume normal operation
-                    args.jam_at = 0   # Disable jam so it doesn't happen again
-                else:
-                    # While jammed, we SKIP the Data Block to allow Heartbeat Block to trigger
-                    pass 
-            # --- JAMMING LOGIC END ---
-
-            # --- Logic: Generate Data ---
-            # We generate data periodically based on REPORTING_INTERVAL
-            if not is_jammed and time_since_last >= reporting_interval:
+            # --- Logic 1: Generate Data ---
+            if (current_time - last_read_time >= reporting_interval):
                 
                 # 1. Read Sensor
                 reading = generate_sensor_readings()
                 readings_buffer.append(reading)
-                last_action_time = current_time # Reset timer
+                last_read_time = current_time 
                 
                 # 2. Check if ready to send (Batch full?)
                 if len(readings_buffer) >= batch_limit:
                     
-                    # Prepare Payload
+                    # Prepare & Send
                     payload = prepare_batch_payload(readings_buffer)
                     
-                    # Safety Check: Max Payload Size
-                    # Header(9) + Checksum(2) = 11 bytes overhead
-                    # We want total packet <= 200 (or payload <= 200 depending on spec)
-                    # Let's assume payload limit strictly.
+                    # Safety Check
                     if len(payload) > MAX_PAYLOAD_SIZE:
-                        print(f"\n[!!!] FATAL ERROR: Payload size ({len(payload)}B) exceeds limit ({MAX_PAYLOAD_SIZE}B).")
-                        print(f"[!!!] Current Batch Size: {batch_limit}")
-                        print(f"[!!!] Action Required: Please restart the client with a smaller --batch size.")
-                        
-                        break                     
-                    # Create Packet
+                        print(f"\n[!!!] FATAL ERROR: Payload size ({len(payload)}B) exceeds limit.")
+                        break
+
                     packet = create_packet(device_id, seq_num, MSG_DATA, payload)
-                    
-                    # Send
                     sock.sendto(packet, server_addr)
                     
-                    print(f"[DATA] Seq:{seq_num} | Time:{current_time:.2f} | Size:{len(packet)}B | Readings:{len(readings_buffer)}")
+                    print(f"[DATA] Seq:{seq_num} | Time:{current_time:.2f} | Size:{len(packet)}B")
                     
-                    # Cleanup
+                    # Update Network Timer
+                    last_send_time = current_time 
+                    
                     readings_buffer = []
-                    
-                    # Increment Sequence (Handle Wrap Around)
                     seq_num = (seq_num + 1) % 65536
             
-            # --- Logic: Heartbeat ---
-            # If buffer is empty and time passed > HEARTBEAT_INTERVAL
-            elif (len(readings_buffer) == 0) and (time_since_last > HEARTBEAT_INTERVAL):
+            # --- Logic 2: Heartbeat ---
+            # Check how long the network has been silent
+            time_since_send = current_time - last_send_time
+            
+            # Send heartbeat ONLY if buffer empty and timer expired
+            if (len(readings_buffer) == 0) and (time_since_send > heart_beat_interval):
                 
-                # Create Heartbeat (No payload)
                 packet = create_packet(device_id, seq_num, MSG_HEARTBEAT)
-                
                 sock.sendto(packet, server_addr)
                 print(f"[HEARTBEAT] Seq:{seq_num} | Alive")
                 
-                last_action_time = current_time
+                # Update Network Timer
+                last_send_time = current_time
                 seq_num = (seq_num + 1) % 65536
 
-            # Small sleep to prevent 100% CPU usage
             time.sleep(0.01)
 
     except KeyboardInterrupt:
