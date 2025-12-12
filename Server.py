@@ -20,8 +20,7 @@ SEQ_MAX = 65536
 WRAP_THRESHOLD = 30000   
 VERSION = 1
 # Reordering Settings
-REORDER_BUFFER_SIZE = 20  
-FLUSH_THRESHOLD = 20      
+DEFAULT_FLUSH_THRESHOLD = 20      
 
 # Message Types
 MSG_DATA = 0x01
@@ -167,8 +166,10 @@ def main():
     parser.add_argument('--port', type=int, default=SOURCE_PORT, help='Server Port')
     parser.add_argument('--output', type=str, default=OUTPUT_CSV, help='CSV output file')
     parser.add_argument('--died_after', type=int, default=LIVENESS_TIMEOUT, help='consider the client dead after timeout (seconds)')
+    parser.add_argument('--buffer', type=int, default=DEFAULT_FLUSH_THRESHOLD,help='Reordering buffer flush threshold')
 
     args = parser.parse_args()
+    flush_threshold = args.buffer
 
     liveness_timeout_client = args.died_after
 
@@ -301,7 +302,7 @@ def main():
             # 6. Reordering Logic
             state['buffer'].sort(key=lambda x: x['timestamp_sent'])
             
-            while len(state['buffer']) > FLUSH_THRESHOLD:
+            while len(state['buffer']) > flush_threshold:
                 packet_to_process = state['buffer'].pop(0)
                 process_and_log_packet(state, packet_to_process, args.output)
 
