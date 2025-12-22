@@ -20,6 +20,7 @@ BATCH_SIZE = 5            # Readings per packet
 # Protocol Definition
 # Header: DeviceID(2) + SeqNum(2) + Timestamp(4) + MsgType(1) = 9 Bytes
 HEADER_FORMAT = '!HHIB'  
+MSG_INIT = 0x00
 MSG_DATA = 0x01
 MSG_HEARTBEAT = 0x02
 PROTOCOL_VERSION = 1  # We are defining this as Version 1
@@ -143,6 +144,12 @@ def main():
     # Independent Timers
     last_read_time = time.time()
     last_send_time = time.time()  
+
+    # Send INIT packet
+    init_packet = create_packet(device_id, seq_num, MSG_INIT)
+    sock.sendto(init_packet, server_addr)
+    print(f"[INIT] Seq:{seq_num} | Device {device_id} initialized")
+    seq_num = (seq_num + 1) % 65536
 
     try:
         while True:
