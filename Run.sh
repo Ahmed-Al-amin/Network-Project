@@ -61,13 +61,7 @@ run_test() {
         sleep 0.1
     done
 
-    # Display a countdown
-    secs=$DURATION
-    while [ $secs -gt 0 ]; do
-       echo -ne "Running... $secs\033[0K\r"
-       sleep 1
-       : $((secs--))
-    done
+    sleep $DURATION
     echo ""
 
     for pid in "${CLIENT_PIDS[@]}"; do kill -INT $pid; done
@@ -78,7 +72,7 @@ run_test() {
     kill -9 $SERVER_PID 2>/dev/null
     
     tc qdisc del dev $INTERFACE root 2>/dev/null
-    cleanup
+    
 
 }
 
@@ -96,7 +90,7 @@ run_test "batching_mode" 1.0 5 "none" ""
 # 3. Heartbeat
 run_test "test_heartbeat" 25.0 1 "none" "" 
 
-# 4. Loss
+# 4. Loss 5%
 run_test "loss_5_percent" 1.0 1 "loss 5%"
 
 # 5. Jitter

@@ -23,6 +23,7 @@ VERSION = 1
 DEFAULT_FLUSH_THRESHOLD = 20      
 
 # Message Types
+MSG_INIT = 0x00
 MSG_DATA = 0x01
 MSG_HEARTBEAT = 0x02
 
@@ -44,14 +45,15 @@ def initialize_csv(filename):
     headers = [
         'device_id', 'seq', 'timestamp_raw', 'readable_time', 'arrival_time', 
         'duplicate_flag', 'gap_flag', 'gap_count',
-        'latency_ms', 'jitter_ms', 'msg_type', 'payload_size', 'cpu_ms'
+        'latency_ms', 'jitter_ms', 'msg_type', 'payload_size', 
+        'temp', 'humidity', 'voltage', 'cpu_ms'  # <--- Added sensor fields
     ]
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(headers)
     print(f"[*] Log file initialized: {filename}")
 
-def log_packet(filename, data_dict):
+def log_packet(filename, data_dict, t, h, v): # Added t, h, v parameters
     dt_object = datetime.fromtimestamp(data_dict['arrival_time'])
     readable_str = dt_object.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
@@ -73,72 +75,63 @@ def log_packet(filename, data_dict):
             f"{data_dict['jitter']:.3f}",
             data_dict['msg_type'],
             data_dict['payload_len'],
+            round(t, 2),  # Individual reading
+            round(h, 2),  # Individual reading
+            round(v, 2),  # Individual reading
             f"{data_dict.get('cpu_ms', 0):.6f}"
         ])
 
+
 def process_and_log_packet(state, packet_data, filename):
     t0 = perf_counter() 
-    #t0 = process_time()
     seq_num = packet_data['seq']
     device_id = packet_data['device_id']
     
-    # Update Stats: Increment Total Received
     state['stats']['received'] += 1
 
-    # --- Gap & Sequence Logic ---
+    # --- Gap & Sequence Logic (Per Packet) ---
     gap_detected = False
     gap_count = 0
     
-    # Check if this seq was already processed (Duplicate Check)
     if seq_num in state['processed_seqs']:
         packet_data['duplicate'] = True
-        packet_data['status'] = 'Duplicate (Buffered)'
-        
-        # Update Stats: Increment Duplicates
         state['stats']['duplicates'] += 1
-        
-        print(f"[Device {device_id}] Duplicate suppressed: Seq {seq_num}")
     else:
         state['processed_seqs'].append(seq_num)
-        
-        # Gap Logic
         if state['last_processed_seq'] is not None:
             last = state['last_processed_seq']
             diff = seq_num - last
-
-            # Wrap Around
             if diff < -WRAP_THRESHOLD: 
                 real_diff = seq_num + SEQ_MAX - last
                 if real_diff > 1:
                     gap_detected = True
                     gap_count = real_diff - 1
-            
-            # Normal Gap
             elif diff > 1:
                 gap_detected = True
                 gap_count = diff - 1
-            
-            if diff < 0 and diff > -WRAP_THRESHOLD:
-                 packet_data['status'] = 'Late-Arrival'
-
         state['last_processed_seq'] = seq_num
 
     packet_data['gap_detected'] = gap_detected
     packet_data['gap_count'] = gap_count
-    
-    # Update Stats: Increment Gaps
     if gap_detected:
         state['stats']['gaps'] += gap_count
-        print(f"[Device {device_id}] GAP! Lost {gap_count} packets (Seq {seq_num})")
 
     t1 = perf_counter()
-    #t1 = process_time()
     logic_cost_ms = (t1 - t0) * 1000 
-    parse_cost_ms = packet_data.get('parse_cost_ms', 0)
-    packet_data['cpu_ms'] = logic_cost_ms + parse_cost_ms
+    packet_data['cpu_ms'] = logic_cost_ms + packet_data.get('parse_cost_ms', 0)
     
-    # Log to CSV
-    log_packet(filename, packet_data)
+    # --- "Explode" the Batch: Log each reading ---
+    readings = packet_data.get('readings', [])
+    
+    if not readings: # Handle Heartbeats or empty data
+        log_packet(filename, packet_data, 0.0, 0.0, 0.0)
+    else:
+        for r in readings:
+            # r is a tuple (temp, hum, volt)
+            log_packet(filename, packet_data, r[0], r[1], r[2])
+
+
+
 
 # ==========================================
 # Main Server Loop
@@ -268,6 +261,22 @@ def main():
                  print(f"[*] ALERT: Device {device_id} is BACK ONLINE!")
             state['status_alive'] = True
             
+            # --- PAYLOAD PARSING ---
+            payload = data[HEADER_SIZE+2:]
+            readings_list = []
+            if msg_type == MSG_DATA and len(payload) > 0:
+                try:
+                    count = struct.unpack('!B', payload[:1])[0]
+                    for i in range(count):
+                        start_idx = 1 + (i * 12)
+                        end_idx = start_idx + 12
+                        if len(payload) >= end_idx:
+                            chunk = payload[start_idx:end_idx]
+                            t_val, h_val, v_val = struct.unpack('!fff', chunk)
+                            readings_list.append((t_val, h_val, v_val))
+                except struct.error:
+                    print(f"[!] Payload parse error from {device_id}")
+
             # 4. Pre-Calculation
             relative_arrival = arrival_time - TIMESTAMP_OFFSET
             arrival_ms_masked = int(relative_arrival * 1000) & 0xFFFFFFFF
@@ -291,8 +300,9 @@ def main():
                 'duplicate': False,            
                 'gap_detected': False,          
                 'gap_count': 0,
-                'msg_type': 'DATA' if msg_type == MSG_DATA else 'HEARTBEAT',
+                'msg_type': 'INIT' if msg_type == MSG_INIT else ('DATA' if msg_type == MSG_DATA else 'HEARTBEAT'),
                 'payload_len': len(data) - HEADER_SIZE - 2,
+                'readings': readings_list,
                 'status': 'Buffered',
                 'parse_cost_ms': parse_cost_ms
             }
