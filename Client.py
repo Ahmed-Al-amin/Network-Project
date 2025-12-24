@@ -173,6 +173,11 @@ def main():
                     if len(payload) > MAX_PAYLOAD_SIZE:
                         print(f"\n[!!!] FATAL ERROR: Payload size ({len(payload)}B) exceeds limit.")
                         break
+                    
+                    # Safety Check for total UDP payload
+                    # if len(packet) > MAX_PAYLOAD_SIZE:
+                    #     print(f"\n[!!!] FATAL ERROR: Payload size ({len(packet)}B) exceeds limit.")
+                    #     break
 
                     packet = create_packet(device_id, seq_num, MSG_DATA, payload)
                     sock.sendto(packet, server_addr)

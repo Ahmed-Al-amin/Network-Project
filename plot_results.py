@@ -1,120 +1,148 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-import sys
 import os
 
-def generate_plots(csv_file):
-    try:
-        # Load Data
-        df = pd.read_csv(csv_file)
-        
-        if df.empty:
-            print(f"[!] Warning: {csv_file} is empty. Skipping.")
-            return
+OUTPUT_DIR = "Output"
+GRAPHS_DIR = "Graphs"
+HEADER_SIZE = 11  # 9B Header + 2B Checksum
 
-        # Create Output Filename (same folder as CSV)
-        base_name = os.path.splitext(csv_file)[0]
-        output_file = f"{base_name}_analysis.png"
-        
-        # Setup Figure (3 subplots)
-        fig, ax = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-        fig.suptitle(f'Protocol Analysis: {os.path.basename(csv_file)}', fontsize=16)
+if not os.path.exists(GRAPHS_DIR):
+    os.makedirs(GRAPHS_DIR)
 
-        # Calculate relative time (start at 0)
-        # Handle case where file might have only 1 row or messy timestamps
-        start_time = df['arrival_time'].min()
-        relative_time = df['arrival_time'] - start_time
-        
-        # --- Plot 1: Latency & Jitter ---
-        # Filter out negative latency (clock sync issues) for cleaner graphs
-        valid_mask = df['latency_ms'] >= 0
-        valid_latency = df.loc[valid_mask, 'latency_ms']
-        valid_time = relative_time[valid_mask]
-        
-        ax[0].plot(valid_time, valid_latency, label='Latency', color='blue', alpha=0.7)
-        ax[0].plot(relative_time, df['jitter_ms'], label='Jitter', color='orange', alpha=0.5)
-        ax[0].set_ylabel('Time (ms)')
-        ax[0].set_title('Network Performance')
-        ax[0].legend(loc='upper right')
-        ax[0].grid(True)
+def load_csv(test_name):
+    path = os.path.join(OUTPUT_DIR, test_name, f"{test_name}.csv")
+    if not os.path.exists(path):
+        print(f"[!] Missing: {path}")
+        return None
+    return pd.read_csv(path)
 
-        # --- Plot 2: Sequence Gaps (Loss) & Duplicates ---
-        # Gaps
-        gaps = df[df['gap_flag'] == 1]
-        if not gaps.empty:
-            gap_times = gaps['arrival_time'] - start_time
-            ax[1].bar(gap_times, gaps['gap_count'], width=0.5, color='red', label='Packets Lost (Gap)')
-        
-        # Duplicates
-        dups = df[df['duplicate_flag'] == 1]
-        if not dups.empty:
-             dup_times = dups['arrival_time'] - start_time
-             # Plot duplicates as 'X' slightly above 0 so they are visible
-             ax[1].scatter(dup_times, [1]*len(dups), color='purple', marker='x', label='Duplicate Detected')
+# ==========================================
+# PLOT A: Bytes vs Interval
+# ==========================================
+def plot_a_overhead():
+    print("[*] Generating Plot A: Overhead...")
+    scenarios = [("1s", "baseline_1s"), ("5s", "baseline_5s"), 
+                 ("10s", "baseline_10s"), ("20s", "baseline_20s"), ("30s", "baseline_30s")]
+    
+    x, y = [], []
+    for lbl, folder in scenarios:
+        df = load_csv(folder)
+        if df is not None:
+            x.append(lbl)
+            y.append(df['payload_size'].mean() + HEADER_SIZE)
 
-        ax[1].set_ylabel('Count / Events')
-        ax[1].set_title('Reliability (Loss & Duplicates)')
-        ax[1].legend(loc='upper right')
-        ax[1].grid(True)
-        # Force Y-axis to be integers if counts are low
-        ax[1].yaxis.get_major_locator().set_params(integer=True)
+    if not x: return
 
+    plt.figure(figsize=(8, 5))
+    bars = plt.bar(x, y, color='#2ecc71', edgecolor='black', alpha=0.8)
+    plt.title('Protocol Overhead: Avg Bytes per Report vs Interval')
+    plt.xlabel('Reporting Interval')
+    plt.ylabel('Avg Packet Size (Bytes)')
+    plt.ylim(0, 35)
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    
+    for bar in bars:
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
+                 f"{bar.get_height():.1f} B", ha='center', fontweight='bold')
+    
+    plt.savefig(f"{GRAPHS_DIR}/plot_a_overhead.png", dpi=300)
+    plt.close()
 
-        # --- Plot 3: Message Types & Throughput ---
-        # Visualize when Data vs Heartbeats arrived
-        data_msgs = df[df['msg_type'] == 1]
-        hb_msgs = df[df['msg_type'] == 2]
-        
-        # We plot these on specific Y-levels to separate them visually
-        if not data_msgs.empty:
-            ax[2].scatter(data_msgs['arrival_time'] - start_time, [1]*len(data_msgs), 
-                          color='green', label='Data Packet', s=15, alpha=0.6)
-        if not hb_msgs.empty:
-            ax[2].scatter(hb_msgs['arrival_time'] - start_time, [2]*len(hb_msgs), 
-                          color='magenta', marker='^', label='Heartbeat', s=40)
-            
-        ax[2].set_yticks([1, 2])
-        ax[2].set_yticklabels(['Data', 'Heartbeat'])
-        ax[2].set_xlabel('Experiment Duration (Seconds)')
-        ax[2].set_title('Traffic Pattern')
-        ax[2].legend(loc='center right')
-        ax[2].grid(True, axis='x')
-        
-        # Adjust layout to prevent overlap
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        
-        # Save
-        plt.savefig(output_file)
-        print(f"[+] Plot generated: {output_file}")
-        plt.close()
+# ==========================================
+# PLOT B: Gap Detection vs Loss
+# ==========================================
+def plot_b_robustness():
+    print("[*] Generating Plot B: Robustness (Gaps)...")
+    scenarios = [(0, "baseline_1s"), (5, "loss_5_percent"),
+                 (10, "loss_10_percent"), (20, "loss_20_percent"), (30, "loss_30_percent")]
+    
+    x, y = [], []
+    for loss, folder in scenarios:
+        df = load_csv(folder)
+        if df is not None:
+            x.append(loss)
+            y.append(df['gap_count'].sum())
 
-    except Exception as e:
-        print(f"[!] Error plotting {csv_file}: {e}")
+    if not x: return
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x, y, marker='o', color='#e74c3c', linewidth=2, markersize=8)
+    plt.title('Robustness: Gap Detection vs Packet Loss')
+    plt.xlabel('Simulated Loss (%)')
+    plt.ylabel('Total Gaps Detected')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.xticks([0, 5, 10, 15, 20, 25, 30])
+    
+    for i, txt in enumerate(y):
+        plt.annotate(f"{txt}", (x[i], y[i]), xytext=(0, 10), textcoords='offset points', ha='center')
+
+    plt.savefig(f"{GRAPHS_DIR}/plot_b_robustness.png", dpi=300)
+    plt.close()
+
+# ==========================================
+# PLOT C: CPU Cost
+# ==========================================
+def plot_c_cpu():
+    print("[*] Generating Plot C: CPU Cost...")
+    scenarios = [("Very High (0.5s)", "baseline_0.5s"), ("High (1s)", "baseline_1s"),
+                 ("Medium (10s)", "baseline_10s"), ("Low (30s)", "baseline_30s")]
+    
+    x, y = [], []
+    for lbl, folder in scenarios:
+        df = load_csv(folder)
+        if df is not None:
+            x.append(lbl)
+            y.append(df['cpu_ms'].mean() * 1000) # Convert to microseconds
+
+    if not x: return
+
+    plt.figure(figsize=(8, 5))
+    bars = plt.bar(x, y, color='#9b59b6', edgecolor='black', width=0.5, alpha=0.8)
+    plt.title('Server Performance: CPU Cost per Packet')
+    plt.ylabel('Processing Time (microseconds)')
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    
+    for bar in bars:
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, 
+                 f"{bar.get_height():.1f} µs", ha='center', fontweight='bold')
+
+    plt.savefig(f"{GRAPHS_DIR}/plot_c_cpu.png", dpi=300)
+    plt.close()
+
+# ==========================================
+# PLOT D: Latency Distribution (Jitter)
+# ==========================================
+def plot_d_jitter():
+    print("[*] Generating Plot D: Latency Distribution...")
+    scenarios = [("Stable (Baseline)", "baseline_1s"), ("Unstable (Jitter)", "jitter_test")]
+    
+    data = []
+    labels = []
+    
+    for lbl, folder in scenarios:
+        df = load_csv(folder)
+        if df is not None:
+            data.append(df['latency_ms'])
+            labels.append(lbl)
+
+    if not data: return
+
+    plt.figure(figsize=(6, 5))
+    plt.boxplot(data, labels=labels, patch_artist=True, 
+                boxprops=dict(facecolor='#3498db', color='black'),
+                medianprops=dict(color='red'))
+    plt.title('Jitter Analysis: End-to-End Latency Distribution')
+    plt.ylabel('Latency (ms)')
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+
+    plt.savefig(f"{GRAPHS_DIR}/plot_d_jitter.png", dpi=300)
+    plt.close()
+# ==========================================
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 plot_results.py <folder_path>")
-        print("Example: python3 plot_results.py experiment_results")
-        sys.exit(1)
-
-    target_dir = sys.argv[1]
-    
-    if not os.path.exists(target_dir):
-        print(f"[!] Error: Directory '{target_dir}' not found.")
-        sys.exit(1)
-
-    print(f"[*] Scanning directory: {target_dir} ...")
-    
-    # Walk through directory and find all CSVs
-    count = 0
-    for root, dirs, files in os.walk(target_dir):
-        for file in files:
-            if file.endswith(".csv"):
-                full_path = os.path.join(root, file)
-                generate_plots(full_path)
-                count += 1
-    
-    if count == 0:
-        print("[!] No CSV files found.")
-    else:
-        print(f"[*] Done. Generated {count} plots.")
+    plot_a_overhead()
+    plot_b_robustness()
+    plot_c_cpu()
+    plot_d_jitter()
+    print("[*] Done! Check the 'Graphs' folder.")

@@ -257,10 +257,21 @@ def main():
             
             state = devices_state[device_id]
             state['last_seen'] = arrival_time
+
             if state['status_alive'] == False:
                  print(f"[*] ALERT: Device {device_id} is BACK ONLINE!")
             state['status_alive'] = True
+
             
+            if msg_type == MSG_INIT:
+                print(f"[*] RESET: Received INIT from Device {device_id}. Clearing sequence history.")
+                state['processed_seqs'].clear()
+                state['last_processed_seq'] = None
+                state['stats']['duplicates'] = 0 # Optional: reset stats for the new session
+            
+
+            
+
             # --- PAYLOAD PARSING ---
             payload = data[HEADER_SIZE+2:]
             readings_list = []
